@@ -1,0 +1,728 @@
+#include a_samp
+#include <a_mysql>
+#include <streamer>
+#include <zcmd>
+#include <foreach>
+#include <sscanf2>
+
+#define DIALOG_LOGIN 			1
+#define DIALOG_REGISTER 		2
+#define DIALOG_CONFIRM_PASS 	3
+#define DIALOG_CHANGE_PASSWORD  4
+
+#define mysql_host "localhost"
+#define mysql_user "root"
+#define mysql_password ""
+#define mysql_database "xenon_gaming_rp"
+
+#define GMName "Xenon Gaming Roleplay"
+
+#define COLOR_ERROR			0xFF0000FF
+#define COLOR_GREEN 		0x008000FF
+#define COLOR_WHITE			0xFFFFFFFF
+#define COLOR_PURPLE		0x9A00FFFF
+#define COLOR_RED           0xFF0000FF
+#define COLOR_YELLOW 		0xFFFF00FF
+#define COLOR_BLUE 			0x0080FFFF
+#define COLOR_DBLUE         0x003366FF
+#define COLOR_GREY 			0x808080FF
+#define COLOR_LIME 			0x00FF00FF
+#define COLOR_PINK			0xFF0080FF
+#define COLOR_BLACK 		0x000000FF
+#define COLOR_LIGHTBLUE 	0x00FFFFFF
+#define COLOR_ORANGE 		0xFF8000FF
+#define RED                 "{FF0000}"
+#define GREY                "{808080}"
+#define GREEN               "{00A400}"
+#define WHITE               "{FFFFFF}"
+#define BLUE               	"{0080FF}"
+#define DBLUE               "{003366}"
+#define COLOR_ADMIN         "{808080}"
+#define DARK_WHITE 			"{BBBBBB}"
+#define LIME            	"{00FF00}"
+#define DARK_RED 			"{BB0000}"
+#define DARK_GREEN			"{00BB00}"
+#define LIGHT_GREEN         "{00FF00}"
+#define PINK                "{FF0080}"
+#define PURPLE				"{9A00FF}"
+#define COLOR_ADMIN_DUTY    COLOR_ADMIN
+
+#define MAKE_ADMIN_RANK         7
+#define MAX_ADMIN_LEVEL         10
+#define ADMIN_MANAGER_RANK      6
+native WP_Hash(buffer[], len, const str[]);
+#pragma tabsize 0
+enum PlayerInfo
+{
+	pID,
+	pPass[129],
+	pAdmin,
+	pVip,
+	pMoney,
+	pScore,
+	pTrustedLevel,
+	pDeaths,
+	pKills,
+	Float:pPos_x,
+	Float:pPos_y,
+	Float:pPos_z,
+	Float:pPos_FacingAngle,
+	pInterior,
+	pSkinID,
+	pVW,
+	pAName[24] // This is their forum name. This will NEVER be shown as their in-game name(shows in /admins, /aduty, etc).
+}
+
+new pInfo[MAX_PLAYERS][PlayerInfo];
+new IsLoggedIn[MAX_PLAYERS];
+new LoginAttempt[MAX_PLAYERS];
+new LoginAttempts[MAX_PLAYERS];
+new RCONMakeAdmin = 0; // RCON Admins CAN'T use /makeadmin by default.
+new serverMOTD[256];
+new aduty[MAX_PLAYERS]; // Admin Duty Variable.
+new pShotBy[MAX_PLAYERS] = INVALID_PLAYER_ID;
+
+new MySQLCon; // MySQL pipeline/main connection.
+
+main()
+{
+	print("\n----------------------------------");
+	print(" Initiating Gamemode(OnGameModeInit)...");
+	print("----------------------------------\n");
+}
+
+public OnGameModeInit()
+{
+	SetGameModeText(GMName);
+	MySQLCon = mysql_connect(mysql_host, mysql_user, mysql_database, mysql_password);
+	if(mysql_errno(MySQLCon) != 0) print("Could not connect to database!");
+	if(mysql_errno(MySQLCon) == 0) print("Successfully connected to MySQL database.");
+	mysql_log(LOG_ERROR | LOG_WARNING, LOG_TYPE_HTML);
+	#if defined g_mapping_sys
+	SendRconCommand("loadfs mapping");
+	gMappingLoaded = 1;
+	#endif
+    LoadMOTD();
+	if(strlen(serverMOTD) < 1) {
+	format(serverMOTD, sizeof(serverMOTD), "Welcome to Xenon Gaming RP!");
+	new query[250];
+	mysql_format(MySQLCon, query, sizeof(query), "INSERT INTO `settings` (`MOTD`) VALUES ('%s')", serverMOTD);
+    mysql_tquery(MySQLCon, query, "", "");
+	print("MOTD Set-Up."); }
+	return 1;
+}
+
+public OnGameModeExit()
+{
+	print("Gamemode has exited.");
+	return 1;
+}
+
+forward LoadMOTD();
+public LoadMOTD()
+{
+	new query[500];
+    mysql_format(MySQLCon, query, sizeof(query), "SELECT * FROM `settings`");
+    mysql_tquery(MySQLCon, query, "OnMOTDLoad", "");
+	return 1;
+}
+
+forward OnMOTDLoad();
+public OnMOTDLoad()
+{
+    cache_get_row(0, 0, serverMOTD, MySQLCon, 256);
+	print("MOTD has been loaded.");
+	return 1;
+}
+
+forward SaveMOTD();
+public SaveMOTD()
+{
+		new query[500];
+    	mysql_format(MySQLCon, query, sizeof(query), "UPDATE `settings` SET `MOTD`='%s'",
+        serverMOTD);
+        mysql_tquery(MySQLCon, query, "", "");
+        print(query);
+        return 1;
+}
+public OnPlayerConnect(playerid)
+{
+	new query[500];
+	SendClientMessage(playerid, -1, "Welcome to Xenon Gaming. Please wait.");
+    new name[MAX_PLAYER_NAME], first[MAX_PLAYER_NAME], last[MAX_PLAYER_NAME], ret;
+	#pragma unused ret
+	GetPlayerName(playerid,name,sizeof(name));
+	if(RPName(name,first,last))
+	{
+	    mysql_format(MySQLCon, query, sizeof(query),"SELECT * FROM `players` WHERE `user` = '%e' LIMIT 1", PlayerName(playerid));
+	    mysql_tquery(MySQLCon, query, "OnAccountCheck", "i", playerid);
+	} else {
+ 		SendClientMessage(playerid, COLOR_RED, "Our system has detected that your name isn't RP. Please relog with an RP name.");
+ 		SetPlayerVirtualWorld(playerid, 9218321);
+ 		Kick(playerid);
+	}
+	return 1;
+}
+
+public OnPlayerDisconnect(playerid)
+{
+	OnPlayerSave(playerid);
+	return 1;
+}
+
+forward OnPlayerSave(playerid);
+public OnPlayerSave(playerid)
+{
+	new query[500], Float: FacingAngle, Float: pPos[3];
+	GetPlayerPos(playerid, pPos[0], pPos[1], pPos[2]);
+	GetPlayerFacingAngle(playerid, FacingAngle);
+	if(IsLoggedIn[playerid] == 1 && playerid != INVALID_PLAYER_ID && !IsPlayerNPC(playerid))
+    {
+        mysql_format(MySQLCon, query, sizeof(query), "UPDATE `players` SET `Admin`=%d, `Vip`=%d, `Money`=%d, `Score`=%d, `TrustedLevel`=%d, `Deaths`=%d, `Kills`=%d, `X`=%f, `Y`=%f, `Z`=%f, `FacingAngle`=%f, `Interior`=%d,`VW`=0,`SkinID`=%d WHERE `ID`=%d AND `user`='%e'",
+        pInfo[playerid][pAdmin],
+        pInfo[playerid][pVip],
+        GetPlayerMoney(playerid),
+        GetPlayerScore(playerid),
+        pInfo[playerid][pTrustedLevel],
+        pInfo[playerid][pDeaths],
+        pInfo[playerid][pKills],
+        pPos[0],
+        pPos[1],
+        pPos[2],
+        FacingAngle,
+        GetPlayerInterior(playerid),
+		pInfo[playerid][pSkinID],
+        pInfo[playerid][pID],
+        PlayerName(playerid));
+        mysql_tquery(MySQLCon, query, "", "");
+        print(query);
+	}
+	return 1;
+}
+
+forward OnAccountCheck(playerid);
+public OnAccountCheck(playerid)
+{
+    new rows, fields, string[128];
+    cache_get_data(rows, fields, MySQLCon);
+    if(rows)
+    {
+        cache_get_row(0, 2, pInfo[playerid][pPass], MySQLCon, 129);
+        pInfo[playerid][pID] = cache_get_row_int(0, 0);
+   		format(string, sizeof(string), "Before playing you must login\n\nUsername: %s\n\nEnter your password below and click login",PlayerName(playerid));
+        ShowPlayerDialog(playerid,DIALOG_LOGIN,DIALOG_STYLE_PASSWORD,"{EDDC57}Login required",string,"Login","Cancel");
+	}
+    else
+    {
+        format(string, sizeof(string), "This server requires you to register an account before playing\n\nUsername: %s\n\nEnter your desired password below then click ok",PlayerName(playerid));
+        ShowPlayerDialog(playerid,DIALOG_REGISTER,DIALOG_STYLE_INPUT,"{EDDC57}Registration required",string,"Register","Cancel");
+    }
+    return 1;
+}
+
+public OnDialogResponse(playerid, dialogid, response, listitem, inputtext[])
+{
+    new query[300];
+    if(dialogid == DIALOG_REGISTER)
+    {
+        if(!response) return Kick(playerid);
+        if(strlen(inputtext) < 6 || strlen(inputtext) > 129)
+		{
+			new string[128];
+		    SendClientMessage(playerid, COLOR_RED, "[ERROR]: Your password must be 6 to 129 characters long!");
+  			format(string, sizeof(string), "This server requires you to register an account before playing\n\nUsername: %s\n\nEnter your desired password below then click ok.",PlayerName(playerid));
+        	ShowPlayerDialog(playerid,DIALOG_REGISTER,DIALOG_STYLE_INPUT,"{EDDC57}Registration required",string,"Register","Cancel");
+  			return 1;
+		} else {
+		    mysql_format(MySQLCon, query, sizeof(query), "INSERT INTO `players` (`user`, `pass`, `IP`) VALUES ('%e', '%s', '%s')", PlayerName(playerid), PasswordHash(inputtext), PlayerIP(playerid));
+            mysql_tquery(MySQLCon, query, "OnPlayerRegister", "i", playerid);
+		}
+    }
+    if(dialogid == DIALOG_LOGIN)
+    {
+        if(!response) return Kick(playerid);
+        if(!strcmp(PasswordHash(inputtext), pInfo[playerid][pPass], false))
+	    {
+	        mysql_format(MySQLCon, query, sizeof(query), "SELECT * FROM `players` WHERE `user` = '%e' LIMIT 1", PlayerName(playerid));
+            mysql_tquery(MySQLCon, query, "OnPlayerLogin", "i", playerid);
+		} else {
+		    LoginAttempt[playerid]++; new string[128];
+		    if(LoginAttempt[playerid] == 1)
+			{
+			    format(string, sizeof(string), "Before playing you must login\n\nUsername: %s\n\nEnter your password below and click login",PlayerName(playerid));
+       		 	ShowPlayerDialog(playerid,DIALOG_LOGIN,DIALOG_STYLE_PASSWORD,"{EDDC57}Login required",string,"Login","Cancel");
+				SendClientMessage(playerid, -1,"{B30000}[ERROR]: {FFFFFF}You have entered an incorrect password. [1/3]");
+			} else if(LoginAttempt[playerid] == 2)
+			{
+			    format(string, sizeof(string), "Before playing you must login\n\nUsername: %s\n\nEnter your password below and click login",PlayerName(playerid));
+       		 	ShowPlayerDialog(playerid,DIALOG_LOGIN,DIALOG_STYLE_PASSWORD,"{EDDC57}Login required",string,"Login","Cancel");
+				SendClientMessage(playerid, -1,"{B30000}[ERROR] {FFFFFF}You have entered an incorrect password. [2/3]");
+			} else if(LoginAttempt[playerid] == 3)
+			{
+                SendClientMessage(playerid, -1,"{B30000}[ERROR] {FFFFFF}You have entered an incorrect password. [3/3]");
+                format(string,sizeof(string),"{208DD6}[SERVER] {FFFFFF}%s[%d] has been kicked from the server. (Max password attempts)",PlayerName(playerid),playerid);
+        		SendClientMessageToAll(COLOR_WHITE,string);
+        		Kick(playerid);
+			}
+		}
+    }
+    if(dialogid == DIALOG_CONFIRM_PASS)
+    {
+		if(!response) return 1;
+		if(!strcmp(PasswordHash(inputtext), pInfo[playerid][pPass], false))
+	    {
+			ShowPlayerDialog(playerid, DIALOG_CHANGE_PASSWORD, DIALOG_STYLE_INPUT, "New Password", "Please enter your new password.", "Change Pass", "Cancel");
+			SetPVarInt(playerid, "pConfirmedPW", 1);
+			return 1;
+		} else {
+			SendClientMessage(playerid, COLOR_WHITE, "Invalid password! Please try again.");
+			return 1;
+		}
+	}
+	if(dialogid == DIALOG_CHANGE_PASSWORD)
+	{
+	    if(!response) return 1;
+	    //if(GetPVarInt(playerid, "pConfirmPW") != 1) return 1; // They shouldn't be here then!
+	    if(pInfo[playerid][pAdmin] > 0 && pInfo[playerid][pAdmin] < 7) return 1; // Admins can't change their own password without the help of a level 7 admin!
+	    if(strlen(inputtext) < 6 || strlen(inputtext) > 129)
+		{
+		    SendClientMessage(playerid, COLOR_WHITE, "Your password must be longer than 6 characters, and shorter than 129.");
+		    DeletePVar(playerid, "pConfirmPW");
+		    return 1;
+		}
+		else {
+		    new newpassword[129];
+		    format(newpassword, 129, "%s", PasswordHash(inputtext));
+		    format(pInfo[playerid][pPass], 129, "%s", newpassword);
+		    mysql_format(MySQLCon, query, sizeof(query), "UPDATE `players` SET `Pass`='%s' WHERE`ID`=%d AND `user`='%e'",
+        	newpassword,
+        	pInfo[playerid][pID],
+			PlayerName(playerid));
+        	mysql_tquery(MySQLCon, query, "", "");
+        	SendClientMessage(playerid, COLOR_WHITE, "Your password has been changed. Please relog to confirm changes.");
+        	SetTimerEx("KickPlayer", 1000, false, "i", playerid);
+        	new string[300];
+			format(string, sizeof(string), "[WARNING]: %s has changed their password(IP: %s - ID: %d)", GetName(playerid), PlayerIP(playerid), playerid);
+			print(string);
+			print(query);
+		}
+	}
+	return 1;
+}
+
+public OnPlayerText(playerid, text[])
+{
+	new words;
+    new length = strlen(text);
+    for(new i = 0; i < length; i++)
+    {
+        if(i != ' ') continue;
+        else words++;
+    }
+    words++;
+
+    new
+        message[128];
+    format(message, sizeof(message), "%s says: %s", GetName(playerid), text);
+    ProxDetector(30.0, playerid, message, -1);
+	if(!IsPlayerInAnyVehicle(playerid)) ApplyAnimation(playerid, "PED", "IDLE_CHAT", 1, 0, 0, 0, 0, words*1000, 1);
+	// else RandCarChat(playerid, GetPlayerVehicleID(playerid), GetPlayerSeatID(playerid));
+    return 0;
+}
+
+public OnPlayerDeath(playerid, killerid, reason)
+{
+	if(playerid != killerid)
+	{
+		pInfo[playerid][pDeaths] += 1;
+		pShotBy[playerid] = killerid;
+		new Float: X, Float: Y, Float: Z;
+		GetPlayerPos(playerid, X, Y, Z);
+		//SetPlayerToRespawn(playerid, DEATH_RESPAWN, -1, -1, -1, -1);
+		//FadePlayerScreen(giveplayerid, FADE_DEATH);
+		return 1;
+	}
+	return 1;
+}
+stock RPName(name[],ret_first[],ret_last[])
+{
+	new len = strlen(name),
+		point = -1,
+		bool:done = false;
+	for(new i = 0; i < len; i++)
+	{
+	  if(name[i] == '_')
+	  {
+	    if(point != -1) return 0;
+	    else {
+				if(i == 0) return 0;
+				point = i + 1;
+			}
+	  } else if(point == -1) ret_first[i] = name[i];
+	  else {
+			ret_last[i - point] = name[i];
+			done = true;
+		}
+	}
+	if(!done) return 0;
+	return 1;
+}
+
+stock PlayerName(playerid)
+{
+	new pName[MAX_PLAYER_NAME];
+	GetPlayerName(playerid, pName, sizeof(pName));
+	return pName;
+}
+
+stock PasswordHash(value[])
+{
+	new buffer[129];
+    WP_Hash(buffer,sizeof(buffer),value);
+    return buffer;
+}
+
+stock PlayerIP(playerid)
+{
+	new IP[16];
+	GetPlayerIp(playerid, IP, sizeof(IP));
+	return IP;
+}
+
+stock GetName(playerid)
+{
+    new
+        name[24];
+    GetPlayerName(playerid, name, sizeof(name));
+    strreplace(name, '_', ' ');
+    return name;
+}
+
+stock ProxDetector(Float:radi, playerid, string[],color)
+{
+    new Float:x,Float:y,Float:z;
+    GetPlayerPos(playerid,x,y,z);
+    foreach(Player,i)
+    {
+        if(IsPlayerInRangeOfPoint(i,radi,x,y,z))
+        {
+            SendClientMessage(i,color,string);
+        }
+    }
+}
+
+stock strreplace(string[], find, replace)
+{
+    for(new i=0; string[i]; i++)
+    {
+        if(string[i] == find)
+        {
+            string[i] = replace;
+        }
+    }
+}
+
+stock SendAdminMessage(color, string[])
+{
+	foreach(Player, i) {
+	    if(pInfo[i][pAdmin] > 0 && IsLoggedIn[i] == 1) SendClientMessage(i, color, string); }
+	return 1;
+}
+
+forward OnPlayerRegister(playerid);
+public OnPlayerRegister(playerid)
+{
+    pInfo[playerid][pID] = cache_insert_id();
+    GivePlayerMoney(playerid, 250);
+    SetPlayerScore(playerid, 0);
+    SpawnPlayer(playerid);
+    SetPlayerSkinEx(playerid, 299);
+    SetPlayerPos(playerid, -182.8357,1132.6742,19.7422);
+	SetCameraBehindPlayer(playerid);
+    IsLoggedIn[playerid] = 1;
+    SendClientMessage(playerid, COLOR_WHITE, "You have successfully registered an account and have spawned at City Hall. Please continue the registration prompts.");
+	return 1;
+}
+
+forward KickPublic(playerid);
+public KickPublic(playerid) { Kick(playerid); return 1; }
+
+forward OnPlayerLogin(playerid);
+public OnPlayerLogin(playerid)
+{
+    pInfo[playerid][pAdmin] = cache_get_row_int(0, 4);
+    pInfo[playerid][pVip] = cache_get_row_int(0, 5);
+    pInfo[playerid][pMoney] = cache_get_row_int(0, 6);
+    pInfo[playerid][pScore] = cache_get_row_int(0, 7);
+    pInfo[playerid][pTrustedLevel] = cache_get_row_int(0, 8);
+    pInfo[playerid][pDeaths] = cache_get_row_int(0, 9);
+    pInfo[playerid][pKills] = cache_get_row_int(0, 10);
+    pInfo[playerid][pPos_x] = cache_get_row_int(0, 11);
+    pInfo[playerid][pPos_y] = cache_get_row_int(0, 12);
+    pInfo[playerid][pPos_z] = cache_get_row_int(0, 13);
+    pInfo[playerid][pPos_FacingAngle] = cache_get_row_int(0, 14);
+    pInfo[playerid][pInterior] = cache_get_row_int(0, 15);
+    pInfo[playerid][pVW] = cache_get_row_int(0, 15);
+	pInfo[playerid][pSkinID] = cache_get_row_int(0, 17);
+
+    SetSpawnInfo(playerid,pInfo[playerid][pSkinID], 0, pInfo[playerid][pPos_x], pInfo[playerid][pPos_y], pInfo[playerid][pPos_z], pInfo[playerid][pPos_FacingAngle], 0, 0, 0, 0, 0, 0);
+    SpawnPlayer(playerid);
+    GivePlayerMoney(playerid, pInfo[playerid][pMoney]);
+    SetPlayerScore(playerid, pInfo[playerid][pScore]);
+    SetPlayerSkin(playerid, pInfo[playerid][pSkinID]);
+	new string[126];
+    format(string, sizeof(string), "[DEBUG]: %f %f %f", pInfo[playerid][pPos_x], pInfo[playerid][pPos_y], pInfo[playerid][pPos_z]);
+	print(string);
+    IsLoggedIn[playerid] = 1;
+    if(pInfo[playerid][pAdmin] != 0) SendClientMessage(playerid, COLOR_RED, "You have logged in as an administrator. Use [/adminhelp] to see your commands.");
+
+	SendClientMessage(playerid, COLOR_WHITE, "{8EC7DC}[INFO]: {FFFFFF}You have been logged in.");
+	new bigstring[261];
+	format(bigstring, sizeof(bigstring), "MOTD: %s", serverMOTD);
+	SendClientMessage(playerid, COLOR_WHITE, bigstring);
+	return 1;
+}
+
+stock SetPlayerSkinEx(playerid, skinid)
+{
+	pInfo[playerid][pSkinID] = skinid;
+	if(IsPlayerInAnyVehicle(playerid))
+	{
+		new vehicleid = GetPlayerVehicleID(playerid), iSeatID = GetPlayerVehicleSeat(playerid);
+		if(iSeatID == 128) return SetPlayerSkin(playerid, skinid); // They're bugged anyway, so why not just set it right away.
+		RemovePlayerFromVehicle(playerid);
+		SetPlayerSkin(playerid, skinid);
+		PutPlayerInVehicle(playerid, vehicleid, iSeatID);
+		return 1;
+	}
+	SetPlayerSkin(playerid, skinid);
+	return 1;
+}
+	    
+CMD:adminhelp(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] == 0) return SendClientMessage(playerid, COLOR_WHITE, "There are no commands for your rank.");
+	if(pInfo[playerid][pAdmin] >= 1) SendClientMessage(playerid, COLOR_WHITE, "Level 1 Admin: /kick /poke /a /aduty /gotov /getcar /respawnv");
+	if(pInfo[playerid][pAdmin] >= 2) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= 3) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= 4) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= 5) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= 6) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= 7) SendClientMessage(playerid, COLOR_WHITE, "There are no commands for this rank.");
+	if(pInfo[playerid][pAdmin] >= ADMIN_MANAGER_RANK) SendClientMessage(playerid, COLOR_WHITE, "ADMIN MANAGER: /setforumname");
+	if(pInfo[playerid][pAdmin] >= MAKE_ADMIN_RANK) SendClientMessage(playerid, COLOR_WHITE, "Administrative Management: /makeadmin");
+	return 1;
+}
+
+CMD:kick(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= 1)
+	{
+	    new giveplayerid, reason[128], string[200];
+	    if(sscanf(params, "us[128]", giveplayerid, reason)) return SendClientMessage(playerid, COLOR_WHITE, "USAGE: /kick [playerid] [reason]");
+	    if(IsPlayerConnected(giveplayerid) && pInfo[playerid][pAdmin] > pInfo[giveplayerid][pAdmin])
+	    {
+			format(string, sizeof(string), "Warn: %s has been kicked from the server by Administrator %s, reason: %s", GetName(giveplayerid), GetName(playerid), reason);
+			SendClientMessageToAll(COLOR_RED, string);
+			print(string);
+			format(string, sizeof(string), "You have been kicked from the server by Admin %s, for: %s.", GetName(playerid), reason);
+			SendClientMessage(giveplayerid, COLOR_RED, string);
+			IsLoggedIn[giveplayerid] = 0;
+			LoginAttempts[giveplayerid] = 0;
+            SetTimerEx("KickPublic", 1000, false, "i", playerid);
+            return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_RED, "They aren't connected, or have a higher admin rank than you.");
+	}
+	else return SendClientMessage(playerid, COLOR_RED, "You're not authorized to use this command.");
+}
+
+CMD:poke(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= 1)
+	{
+	    new giveplayerid, message[128], string[200];
+	    if(sscanf(params, "us[128]", giveplayerid, message)) return SendClientMessage(playerid, COLOR_WHITE, "USAGE: /poke [playerid] [message]");
+		if(IsPlayerConnected(giveplayerid))
+		{
+		    ShowPlayerDialog(playerid, 0, DIALOG_STYLE_MSGBOX, "An admin pokes you.", message, "Okay", "Okay");
+			format(string, sizeof(string), "You poked %s with the message %s.", GetName(giveplayerid), message);
+			SendClientMessage(playerid, COLOR_RED, string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_RED, "They aren't connected.");
+	}
+	else return SendClientMessage(playerid, COLOR_RED, "You're not authorized to use this command.");
+}
+
+CMD:makeadmin(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= MAKE_ADMIN_RANK || IsPlayerAdmin(playerid) && RCONMakeAdmin == 1)
+	{
+	    new giveplayerid, level;
+	    if(sscanf(params, "ud", giveplayerid, level)) return SendClientMessage(playerid, COLOR_WHITE, "USAGE: /makeadmin [playerid] [level]");
+	    if(IsPlayerConnected(giveplayerid) && level < MAX_ADMIN_LEVEL)
+	    {
+	        new status[64], string[200];
+	        if(level > pInfo[giveplayerid][pAdmin]) format(status, 64, "Promoted");
+	        else format(status, 64, "Demoted");
+			pInfo[giveplayerid][pAdmin] = level;
+			format(string, sizeof(string), "AdminWarning: %s has %s %s to level %d admin.", GetName(playerid), status, GetName(giveplayerid), level);
+			SendAdminMessage(COLOR_RED, string);
+			print(string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_RED, "They aren't connected or the level entered is invalid.");
+	}
+	else SendClientMessage(playerid, COLOR_RED, "You're not authorized to use this command.");
+}
+
+CMD:a(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= 1 && aduty[playerid] || pInfo[playerid][pAdmin] >= 7) // Level 7 Admins can use this whilst off-duty.
+	{
+	    new message[64];
+	    if(sscanf(params, "s[64]", message)) return SendClientMessage(playerid, COLOR_WHITE, "USAGE: /a [message]");
+	    new string[200];
+		format(string, sizeof(string), "Level %d Admin %s: %s", pInfo[playerid][pAdmin], GetName(playerid), message);
+		SendAdminMessage(COLOR_YELLOW, string);
+		return 1;
+	}
+	else return SendClientMessage(playerid, COLOR_RED, "You're not an admin, or are not on-duty.");
+}
+
+CMD:setforumname(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= ADMIN_MANAGER_RANK) // This rank can access commands to "edit" admin accounts, how-ever they can't actually use /makeadmin.
+	{
+	    new giveplayerid, name[128], string[256];
+	    if(sscanf(params, "us[128]", giveplayerid, name)) return SendClientMessage(playerid, COLOR_WHITE, "USAGE: /setforumname [player] [name]");
+	    if(IsPlayerConnected(giveplayerid)) {
+			if(pInfo[giveplayerid][pAdmin] == 0) return SendClientMessage(playerid, COLOR_WHITE, "Only admins can have forum names associated with their account.");
+			format(pInfo[playerid][pAdmin], 128, "%s", name);
+			format(string, sizeof(string), "Your forum-name has been set to %s by Level %d Admin %s.", name, pInfo[playerid][pAdmin], GetName(playerid));
+			SendClientMessage(giveplayerid, COLOR_RED, string);
+			format(string, sizeof(string), "You have set %s's forum name to %s.", GetName(giveplayerid), name);
+			SendClientMessage(playerid, COLOR_RED, string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_RED, "They aren't connected.");
+	}
+	else return SendClientMessage(playerid, COLOR_RED, "You're not authorized to use this command.");
+}
+CMD:aduty(playerid, params[])
+{
+	new string[128];
+	if(pInfo[playerid][pAdmin] >= 1)
+	{
+		if(aduty[playerid] == 0) // Off Duty
+		{
+		    new Float: X, Float: Y, Float: Z;
+		    GetPlayerPos(playerid, X, Y, Z);
+		    TogglePlayerSpectating(playerid, true);
+		    TogglePlayerSpectating(playerid, false);
+		    SpawnPlayer(playerid);
+		    SetPlayerSkin(playerid, pInfo[playerid][pSkinID]);
+		    SetPlayerColor(playerid, COLOR_ORANGE);
+		    format(string, sizeof(string), "AdmWarn: %s is now on-duty(%s).", GetName(playerid), pInfo[playerid][pAName]);
+			SendAdminMessage(COLOR_WHITE, string);
+			SetPlayerPos(playerid, X, Y, Z);
+			aduty[playerid] = 1;
+			return 1;
+		}
+		else {
+		    SetPlayerSkin(playerid, pInfo[playerid][pSkinID]);
+			aduty[playerid] = 0;
+			SetPlayerColor(playerid, COLOR_WHITE);
+            format(string, sizeof(string), "AdmWarn: %s is now off-duty(%s).", GetName(playerid), pInfo[playerid][pAName]);
+			SendAdminMessage(COLOR_WHITE, string);
+			return 1;
+		}
+	}
+	else return SendClientMessage(playerid, COLOR_WHITE, "You're not an administrator!");
+}
+
+CMD:getcar(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= 1 && aduty[playerid] || pInfo[playerid][pAdmin] >= 7)
+	{
+		new vehicleid, string[129];
+		if(sscanf(params, "d", vehicleid)) return SendClientMessage(playerid, COLOR_GREY, "USAGE: /getcar [vehicleid]");
+		if(vehicleid != INVALID_VEHICLE_ID)
+		{
+			new Float: X, Float: Y, Float: Z;
+			GetPlayerPos(playerid, X, Y, Z);
+			SetVehiclePos(vehicleid, X, Y+5, Z);
+			format(string, sizeof(string), "You have teleported vehicle ID %d to you.", vehicleid);
+			SendClientMessage(playerid, COLOR_RED, string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_WHITE, "Invalid vehicle ID!");
+	}
+	else return SendClientMessage(playerid, COLOR_WHITE, "You aren't an admin, or aren't on-duty.");
+}
+
+CMD:gotov(playerid, params[])
+{
+     if(pInfo[playerid][pAdmin] >= 1 && aduty[playerid] || pInfo[playerid][pAdmin] >= 7)
+	 {
+		new vehicleid, string[129];
+		if(sscanf(params, "d", vehicleid)) return SendClientMessage(playerid, COLOR_GREY, "USAGE: /gotov [vehicleid]");
+		if(vehicleid != INVALID_VEHICLE_ID)
+		{
+			new Float: X, Float: Y, Float: Z;
+			GetVehiclePos(playerid, X, Y, Z);
+			SetPlayerPos(vehicleid, X, Y+1.25, Z);
+			format(string, sizeof(string), "You have teleported yourself to vehicle ID %d.", vehicleid);
+			SendClientMessage(playerid, COLOR_RED, string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_WHITE, "Invalid vehicle ID!");
+	}
+    else return SendClientMessage(playerid, COLOR_WHITE, "You aren't an admin, or aren't on-duty.");
+}
+
+CMD:respawnv(playerid, params[])
+{
+     if(pInfo[playerid][pAdmin] >= 1 && aduty[playerid] || pInfo[playerid][pAdmin] >= 7)
+	 {
+		new vehicleid, string[129];
+		if(sscanf(params, "d", vehicleid)) return SendClientMessage(playerid, COLOR_GREY, "USAGE: /gotov [vehicleid]");
+		if(vehicleid != INVALID_VEHICLE_ID)
+		{
+			SetVehicleToRespawn(vehicleid);
+			format(string, sizeof(string), "You have respawned vehicle ID %d.", vehicleid);
+			SendClientMessage(playerid, COLOR_RED, string);
+			return 1;
+		}
+		else return SendClientMessage(playerid, COLOR_WHITE, "Invalid vehicle ID!");
+	}
+	else return SendClientMessage(playerid, COLOR_WHITE, "You aren't an admin, or aren't on-duty.");
+}
+
+CMD:changepassword(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] == 0)
+	{
+		ShowPlayerDialog(playerid, DIALOG_CONFIRM_PASS, DIALOG_STYLE_INPUT, "Current Password", "Please enter your current password to continue.", "Continue", "Cancel");
+		return 1;
+	}
+	else {
+	    SendClientMessage(playerid, COLOR_GREY, "As an administrator you are unable to change your password for security reasons. Contact a Level 7 admin or above.");
+	    return 1;
+	}
+}
+/*CMD:setnewspawn(playerid, params[])
+{
+	if(pInfo[playerid][pAdmin] >= 7)
+	{
+		new Float: X, Float: Y, Float: Z;
+		GetPlayerPos(playerid, X, Y, Z);
+		new Float: pFacingAngle;
+		GetPlayerFacingAngle(playerid, pFacingAngle);
+		SetNewbieSpawn(X, Y, Z, pFacingAngle);
+		SendClientMessage(playerid, -1, "You have changed the point where new players will spawn!");
+		return 1;
+	}
+	else return SendClientMessage(playerid, COLOR_WHITE, "You're not authorized to use this command.");
+}*/
